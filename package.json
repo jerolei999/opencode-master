@@ -1,0 +1,20 @@
+{
+  "name": "opencode-master",
+  "version": "0.1.0",
+  "description": "Master coordinator for multi-tenant OpenCode Workers: load-aware routing, session leases, direct streaming, and failover.",
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.36.4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "typescript": "^5.6.3"
+  }
+}

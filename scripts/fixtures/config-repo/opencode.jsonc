@@ -1,0 +1,27 @@
+{
+  // 平台级配置：所有 slave 通过 config-sync 注入（OPENCODE_CONFIG_DIR）
+  "agent": {
+    "build": {
+      // 真实场景：改成实际可用的模型，如 "openai/gpt-4o-mini"
+      "model": "sim-provider/sim-model-v1"
+    }
+  },
+  "mcp": {
+    "servers": {
+      // 官方 filesystem MCP（stdio，npx 首次运行自动下载）
+      "fs": {
+        "type": "local",
+        "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp/workspace"]
+      },
+      // 示例：本地脚本型 MCP（零依赖，验证 MCP 注入链路）
+      "demo": {
+        "type": "local",
+        "command": ["echo", "mcp-stub"]
+      }
+    }
+  },
+  "permission": {
+    "edit": "allow",
+    "bash": "ask"
+  }
+}
