@@ -310,7 +310,7 @@ export class Master {
     if (!response.ok) return apiError(502, "WORKER_CONTROL_FAILED", `worker returned ${response.status}`)
     return json({ accepted: true }, 202)
   }
-  private async end(id: string, auth: AuthContext) { const owned = await this.ownedSession(auth, id); if (owned.error) return owned.error; await this.sessions.end(id); return json({ ok: true }) }
+  private async end(id: string, auth: AuthContext) { const owned = await this.ownedSession(auth, id); if (owned.error) return owned.error; await this.sessions.end(id); await this.gateway?.abort(id); return json({ ok: true }) }
   private async renameSession(req: Request, id: string, auth: AuthContext) {
     const owned = await this.ownedSession(auth, id)
     if (owned.error) return owned.error

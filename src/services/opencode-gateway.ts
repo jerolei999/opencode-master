@@ -136,11 +136,30 @@ function extractPendingTool(messages: GatewayOpenCodeMessage[]): PendingTool | u
 export class OpenCodeGateway {
   private readonly baseUrl: string
   private readonly auth?: string
-  private readonly started = false
+  /** Sessions whose active execution should be aborted at the next poll. */
+  private readonly aborted = new Set<string>();
 
   constructor(private readonly opts: { baseUrl: string; username?: string; model?: { providerID: string; id: string }; workspaceRoot?: string }) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "")
     this.auth = authHeader(this.baseUrl, opts.username)
+  }
+
+  /** Abort a running opencode execution for a session. Returns whether it was aborted.
+   *  The in-flight `prompt()`/`resume()` poll loop notices at its next tick and yields.
+   *  Also fires opencode's native `/abort` so a stuck tool call is cancelled.
+   */
+  async abort(sessionId: string): Promise<boolean> {
+    if (!this.aborted.has(sessionId)) this.aborted.add(sessionId)
+    try {
+      await fetch(`${this.baseUrl}/api/session/${sessionId}/abort`, {
+        method: "POST",
+        headers: await this.headers(true),
+        body: JSON.stringify({}),
+      })
+      return true
+    } catch {
+      return false
+    }
   }
 
   /** Map a Master logical directory (e.g. `/workspace/alice`) to a path that exists
@@ -271,6 +290,10 @@ export class OpenCodeGateway {
     try {
       const deadline = Date.now() + 600_000
       for (;;) {
+        if (this.aborted.has(input.sessionId)) {
+          this.aborted.delete(input.sessionId)
+          return { messages: [], status: "suspended" }
+        }
         const pending = await this.pendingQuestions(input.sessionId, dir)
         const first = pending[0]
         if (first !== undefined) {
@@ -374,6 +397,10 @@ export class OpenCodeGateway {
       if (!response.ok) throw new Error(`opencode prompt failed: ${response.status} ${await response.text()}`)
       const deadline = Date.now() + 600_000
       for (;;) {
+        if (this.aborted.has(input.sessionId)) {
+          this.aborted.delete(input.sessionId)
+          return { messages: [], status: "suspended" }
+        }
         const pending = await this.pendingQuestions(input.sessionId, dir)
         const first = pending[0]
         if (first !== undefined) {
