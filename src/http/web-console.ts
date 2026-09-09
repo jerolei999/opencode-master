@@ -1272,6 +1272,19 @@ export function webAppHtml(): string {
 
   var $ = function(id) { return document.getElementById(id); };
 
+  var welcomeCardEl = null;
+  function showWelcome(show) {
+    if (!welcomeCardEl) welcomeCardEl = $("welcomeCard");
+    if (!welcomeCardEl) return;
+    if (show) {
+      welcomeCardEl.style.display = "block";
+      if (!welcomeCardEl.parentNode) $("messagesContainer").appendChild(welcomeCardEl);
+    } else {
+      welcomeCardEl.style.display = "none";
+      if (welcomeCardEl.parentNode) welcomeCardEl.remove();
+    }
+  }
+
   // Toast
   function toast(msg, kind) {
     kind = kind || "";
@@ -1435,8 +1448,7 @@ export function webAppHtml(): string {
     stopStream();
     renderSessionList();
     $("messagesContainer").innerHTML = "";
-    $("welcomeCard").style.display = "block";
-    $("messagesContainer").appendChild($("welcomeCard"));
+    showWelcome(true);
     $("chatTitle").textContent = "选择或创建一个会话";
     $("chatSessionId").textContent = "ID: —";
     $("chatWorkerId").textContent = "节点: —";
@@ -1485,9 +1497,32 @@ export function webAppHtml(): string {
           '<span>' + new Date(s.updatedAt || s.createdAt).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) + '</span>' +
         '</div>' +
         '<div class="session-actions">' +
-          '<button class="action-icon-btn" title="重命名" onclick="openRenameModal(\'' + s.id + '\', \'' + escapeHtml(s.title || '') + '\', event)">✏️</button>' +
-          '<button class="action-icon-btn danger" title="删除/结束" onclick="deleteSession(\'' + s.id + '\', event)">🗑️</button>' +
         '</div>';
+
+      var actionsDiv = li.querySelector(".session-actions");
+      var renameBtn = document.createElement("button");
+      renameBtn.className = "action-icon-btn";
+      renameBtn.title = "重命名";
+      renameBtn.textContent = "✏️";
+      (function(id, title) {
+        renameBtn.onclick = function(e) {
+          e.stopPropagation();
+          openRenameModal(id, title, e);
+        };
+      })(s.id, s.title || "");
+      actionsDiv.appendChild(renameBtn);
+
+      var delBtn = document.createElement("button");
+      delBtn.className = "action-icon-btn danger";
+      delBtn.title = "删除/结束";
+      delBtn.textContent = "🗑️";
+      (function(id) {
+        delBtn.onclick = function(e) {
+          e.stopPropagation();
+          deleteSession(id, e);
+        };
+      })(s.id);
+      actionsDiv.appendChild(delBtn);
       (function(sessionId) {
         li.onclick = function() { selectSession(sessionId); };
       })(s.id);
@@ -1559,10 +1594,9 @@ export function webAppHtml(): string {
       var res = await api("GET", "/api/v1/sessions/" + sessionId + "/messages");
       var msgs = res.messages || [];
       if (msgs.length === 0) {
-        $("welcomeCard").style.display = "block";
-        $("messagesContainer").appendChild($("welcomeCard"));
+        showWelcome(true);
       } else {
-        $("welcomeCard").style.display = "none";
+        showWelcome(false);
         for (var i = 0; i < msgs.length; i++) {
           var m = msgs[i];
           if (m.role === "tool") appendToolCard(m.name, m.content);
@@ -1577,7 +1611,7 @@ export function webAppHtml(): string {
 
   function appendMessage(role, content, extra) {
     extra = extra || {};
-    $("welcomeCard").style.display = "none";
+    showWelcome(false);
     var row = document.createElement("div");
     row.className = "message-row " + role;
 
@@ -1610,7 +1644,7 @@ export function webAppHtml(): string {
   }
 
   function appendToolCard(toolName, content) {
-    $("welcomeCard").style.display = "none";
+    showWelcome(false);
     var card = document.createElement("div");
     card.className = "tool-card";
     card.innerHTML =
@@ -1626,7 +1660,7 @@ export function webAppHtml(): string {
     var draft = $("streamDraft");
     if (draft) return draft;
 
-    $("welcomeCard").style.display = "none";
+    showWelcome(false);
     draft = document.createElement("div");
     draft.id = "streamDraft";
     draft.className = "message-row assistant";

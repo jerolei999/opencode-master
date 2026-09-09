@@ -30,12 +30,29 @@ export type Config = {
   slaveSpawnCmd?: string[]
   /** Credential Master presents to the private Worker proxy. */
   workerProxyCredential?: string
+  /** Native opencode instance base URL for direct Gateway bridging (e.g. the
+   *  Docker runtime on port 4096). When set, Master talks opencode's native API
+   *  directly instead of proxying to a Worker process. */
+  opencodeBaseUrl?: string
+  /** Optional username for the native opencode instance (Basic auth). */
+  opencodeUser?: string
+  /** Model instructs opencode sessions created via the Gateway. */
+  opencodeModel?: { providerID: string; id: string }
+  /** Container-visible workspace root. Master logical `/workspace/<user>` paths
+   *  are mapped to `<opencodeWorkspaceRoot>/<user>` before reaching the instance.
+   */
+  opencodeWorkspaceRoot?: string
 }
 
 const num = (raw: string | undefined, fallback: number) => {
   if (raw === undefined || raw === "") return fallback
   const n = Number(raw)
   return Number.isFinite(n) ? n : fallback
+}
+function parseModel(raw: string | undefined): { providerID: string; id: string } | undefined {
+  if (!raw) return undefined
+  const [providerID, id] = raw.split("/")
+  return providerID && id ? { providerID, id } : undefined
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -61,5 +78,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       ? (JSON.parse(env["OPENCODE_MASTER_SLAVE_SPAWN_CMD"]) as string[])
       : undefined,
     workerProxyCredential: env["OPENCODE_WORKER_PROXY_CREDENTIAL"] ?? "dev-proxy-key",
+    opencodeBaseUrl: env["OPENCODE_MASTER_OPENCODE_URL"] ?? undefined,
+    opencodeUser: env["OPENCODE_MASTER_OPENCODE_USER"] ?? undefined,
+    opencodeModel: parseModel(env["OPENCODE_MASTER_OPENCODE_MODEL"]),
+    opencodeWorkspaceRoot: env["OPENCODE_MASTER_WORKSPACE_ROOT"] ?? undefined,
   }
 }

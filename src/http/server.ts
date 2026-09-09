@@ -9,11 +9,11 @@ import { WorkspaceService } from "../services/workspace-service"
 import { ActiveTurnError, StaleTurnLeaseError, TurnService } from "../services/turn-service"
 import { EventJournal } from "../services/event-journal"
 import { Scheduler, type SchedulerReport } from "../services/scheduler"
-import type { AuthContext, WorkerLoad } from "../types"
+import type { AuthContext, WorkerLoad, HistoryItem, TurnRow } from "../types"
 import { Router } from "./router"
 import { apiError, json, readJson } from "./helpers"
 import { webAppHtml } from "./web-console"
-
+import { OpenCodeGateway } from "../services/opencode-gateway"
 export type MasterOptions = { config?: Config; db?: DB; now?: () => number; autoScheduler?: boolean }
 
 export class Master {
@@ -30,6 +30,8 @@ export class Master {
   private router = new Router()
   private stopScheduler?: () => void
   private server?: Server<Record<string, never>>
+  /** Optional direct bridge to a native opencode instance (no Worker layer). */
+  private gateway?: OpenCodeGateway
 
   constructor(opts: MasterOptions = {}) {
     this.config = opts.config ?? loadConfig()
@@ -42,6 +44,9 @@ export class Master {
     this.turns = new TurnService(this.db, this.now)
     this.events = new EventJournal(this.db, this.now)
     this.scheduler = new Scheduler(this.registry, this.config, this.sessions)
+    if (this.config.opencodeBaseUrl) {
+      this.gateway = new OpenCodeGateway({ baseUrl: this.config.opencodeBaseUrl, username: this.config.opencodeUser, model: this.config.opencodeModel, workspaceRoot: this.config.opencodeWorkspaceRoot })
+    }
     this.buildRoutes()
     if (opts.autoScheduler ?? true) this.stopScheduler = this.scheduler.start()
   }
@@ -179,10 +184,99 @@ export class Master {
     const admitted = await this.turns.createOrGet({ sessionId: id, userId: auth.sub, content: body.content, clientKey: body.idempotencyKey, workerId: worker.id, leaseEpoch: session.leaseEpoch })
     if (!admitted.created) return json({ accepted: true, stream: `/api/v1/sessions/${id}/events`, turn: admitted.turn }, 202)
     if (!await this.turns.lease(admitted.turn.id, worker.id, session.leaseEpoch)) throw new StaleTurnLeaseError(admitted.turn.id)
+    if (this.gateway) {
+      void this.runGatewayPrompt({ sessionId: id, userId: auth.sub, directory: session.directory ?? session.workspaceId ?? id, turn: admitted.turn, workerId: worker.id, leaseEpoch: session.leaseEpoch, content: body.content, history: priorHistory })
+      const turn = await this.turns.get(admitted.turn.id)
+      return json({ accepted: true, stream: `/api/v1/sessions/${id}/events`, turn }, 202)
+    }
     const response = await this.proxy(worker.address, `/sessions/${id}/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: body.content, workspaceID: session.workspaceId ?? id, turnID: admitted.turn.id, leaseEpoch: session.leaseEpoch, history: priorHistory }) })
     if (!response.ok) { await this.turns.fail(admitted.turn.id, worker.id, session.leaseEpoch, `worker returned ${response.status}`); return apiError(502, "WORKER_PROMPT_FAILED", `worker returned ${response.status}`) }
     const turn = await this.turns.get(admitted.turn.id)
     return json({ accepted: true, stream: `/api/v1/sessions/${id}/events`, turn }, 202)
+  }
+
+  private async runGatewayPrompt(input: {
+    sessionId: string
+    userId: string
+    directory: string
+    turn: TurnRow
+    workerId: string
+    leaseEpoch: number
+    content: string
+    history: HistoryItem[]
+  }): Promise<void> {
+    if (!this.gateway) return
+    const { sessionId, userId, turn, workerId, leaseEpoch } = input
+    const emit = async (type: string, data: Record<string, unknown>) => {
+      await this.events.append({ sessionId, tenantId: userId, turnId: turn.id, workerId, leaseEpoch, sourceId: `${workerId}:${type}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`, type, data })
+    }
+    const onDelta = async ({ kind, delta }: { kind: "text" | "reasoning"; delta: string }) => {
+      await emit(kind === "reasoning" ? "session.next.reasoning.delta" : "session.next.text.delta", { sessionID: sessionId, delta })
+    }
+    try {
+      const result = await this.gateway.prompt({
+        sessionId,
+        directory: input.directory,
+        content: input.content,
+        history: input.history,
+        onDelta,
+      })
+      if (result.interaction) {
+        await emit("worker.question.snapshot", result.interaction as unknown as Record<string, unknown>)
+        for (const message of result.messages) await emit("worker.turn.message", message as unknown as Record<string, unknown>)
+        await emit("session.waiting_input", {})
+      } else {
+        for (const message of result.messages) await emit("worker.turn.message", message as unknown as Record<string, unknown>)
+        await this.turns.complete(turn.id, workerId, leaseEpoch)
+        await emit("session.idle", {})
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.turns.fail(turn.id, workerId, leaseEpoch, message)
+      await emit("worker.execution.error", { message })
+    }
+  }
+
+  private async runGatewayResume(input: {
+    sessionId: string
+    directory: string
+    turn: TurnRow
+    workerId: string
+    leaseEpoch: number
+    interactionId: string
+    answer: Record<string, unknown>
+  }): Promise<void> {
+    if (!this.gateway) return
+    const { sessionId, turn, workerId, leaseEpoch } = input
+    const emit = async (type: string, data: Record<string, unknown>) => {
+      await this.events.append({ sessionId, tenantId: turn.userId, turnId: turn.id, workerId, leaseEpoch, sourceId: `${workerId}:${type}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`, type, data })
+    }
+    const onDelta = async ({ kind, delta }: { kind: "text" | "reasoning"; delta: string }) => {
+      await emit(kind === "reasoning" ? "session.next.reasoning.delta" : "session.next.text.delta", { sessionID: sessionId, delta })
+    }
+    try {
+      await emit("worker.question.resolved", { interactionID: input.interactionId })
+      const result = await this.gateway.resume({
+        sessionId,
+        directory: input.directory,
+        interactionId: input.interactionId,
+        answer: input.answer,
+        onDelta,
+      })
+      if (result.interaction) {
+        await emit("worker.question.snapshot", result.interaction as unknown as Record<string, unknown>)
+        for (const message of result.messages) await emit("worker.turn.message", message as unknown as Record<string, unknown>)
+        await emit("session.waiting_input", {})
+      } else {
+        for (const message of result.messages) await emit("worker.turn.message", message as unknown as Record<string, unknown>)
+        await this.turns.complete(turn.id, workerId, leaseEpoch)
+        await emit("session.idle", {})
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.turns.fail(turn.id, workerId, leaseEpoch, message)
+      await emit("worker.execution.error", { message })
+    }
   }
 
   private async ingestWorkerEvent(req: Request, workerId: string) {
@@ -204,6 +298,14 @@ export class Master {
     const turn = await this.turns.active(id)
     if (!turn || turn.assignedWorkerId !== worker.id || !await this.turns.isCurrentLease(id, worker.id, turn.leaseEpoch)) return apiError(409, "STALE_TURN_LEASE", "no active turn for the current worker lease")
     const session = (await this.sessions.get(id))?.session
+    if (this.gateway && body.type === "question.reply") {
+      const data = body.data as Record<string, unknown> | undefined
+      const interactionID = typeof data?.interactionID === "string" ? data.interactionID : undefined
+      const answer = data?.answer
+      if (!interactionID || !answer || typeof answer !== "object" || Array.isArray(answer)) return apiError(400, "BAD_REQUEST", "question.reply requires interactionID and answer")
+      void this.runGatewayResume({ sessionId: id, directory: session?.directory ?? session?.workspaceId ?? id, turn, workerId: worker.id, leaseEpoch: turn.leaseEpoch, interactionId: interactionID, answer: answer as Record<string, unknown> })
+      return json({ accepted: true }, 202)
+    }
     const response = await this.proxy(worker.address, `/sessions/${id}/control`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, workspaceID: session?.workspaceId ?? id, turnID: turn.id, leaseEpoch: turn.leaseEpoch }) })
     if (!response.ok) return apiError(502, "WORKER_CONTROL_FAILED", `worker returned ${response.status}`)
     return json({ accepted: true }, 202)
@@ -266,6 +368,10 @@ export class Master {
     })
     if (!await this.turns.lease(admitted.turn.id, worker.id, session.leaseEpoch)) {
       throw new StaleTurnLeaseError(admitted.turn.id)
+    }
+    if (this.gateway) {
+      void this.runGatewayPrompt({ sessionId, userId, directory: session.directory ?? session.workspaceId ?? sessionId, turn: admitted.turn, workerId: worker.id, leaseEpoch: session.leaseEpoch, content: body.prompt.trim(), history: [] })
+      return json({ accepted: true, sessionId, turn: admitted.turn, workerId: worker.id, stream: `/api/v1/sessions/${sessionId}/events` }, 202)
     }
     const response = await this.proxy(worker.address, `/sessions/${sessionId}/prompt`, {
       method: "POST",

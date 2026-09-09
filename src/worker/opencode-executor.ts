@@ -23,9 +23,9 @@ import type { OpenCodeSessionSnapshotter, SessionSnapshot, SnapshotSafePoint } f
 export type OpenCodeExecutorOptions = {
   slaveId: string
   /** Executable that starts `opencode serve ...` (e.g. scripts/opencode-serve.sh). */
-  opencodeBin: string
-  /** Port for the inner opencode serve. */
-  port: number
+  opencodeBin?: string
+  /** Port for the inner opencode serve. Ignored when externalBaseUrl is set. */
+  port?: number
   /** Directory the slave owns (workspace). */
   directory: string
   /** Per-slave data root: XDG dirs are pointed here for full isolation. */
@@ -42,7 +42,11 @@ export type OpenCodeExecutorOptions = {
   extraEnv?: Record<string, string>
   /** Optional native export adapter. History recovery remains the fallback. */
   snapshotter?: OpenCodeSessionSnapshotter
+  /** When set, connect to an already-running opencode serve instead of spawning
+   *  one (e.g. the Docker runtime on port 4096). */
+  externalBaseUrl?: string
 }
+
 
 export function resolveOpenCodeDatabasePath(dataDir: string, workspaceRoot: string | undefined, configured: string | undefined): string {
   const databasePath = configured
@@ -156,13 +160,27 @@ export class OpenCodeExecutor implements Executor {
   private readonly safePoints = new Map<string, SnapshotSafePoint>()
   constructor(opts: OpenCodeExecutorOptions) {
     this.opts = opts
-    resolveOpenCodeDatabasePath(opts.dataDir, opts.workspaceRoot, opts.extraEnv?.["OPENCODE_DB"])
-    this.baseUrl = `http://127.0.0.1:${opts.port}`
+    if (opts.externalBaseUrl) {
+      this.baseUrl = opts.externalBaseUrl.replace(/\/+$/, "")
+    } else {
+      resolveOpenCodeDatabasePath(opts.dataDir, opts.workspaceRoot, opts.extraEnv?.["OPENCODE_DB"])
+      this.baseUrl = `http://127.0.0.1:${opts.port}`
+    }
   }
 
+
   /** Spawn `opencode serve` and wait for /global/health. Auto-restarts on crash. */
+  /** Start the backend. External mode waits for the existing instance's health. */
   async start(): Promise<void> {
     this.stopped = false
+    if (this.opts.externalBaseUrl) {
+      await this.waitHealthy(20_000)
+      this.started = true
+      this.hydratedSessions.clear()
+      this.sessionDirectories.clear()
+      this.safePoints.clear()
+      return
+    }
     const occupied = await fetch(`${this.baseUrl}/global/health`, {
       headers: { authorization: AUTH },
       signal: AbortSignal.timeout(1000),
@@ -212,6 +230,7 @@ export class OpenCodeExecutor implements Executor {
       ...(this.opts.authContent ? { OPENCODE_AUTH_CONTENT: this.opts.authContent } : {}),
       ...this.opts.extraEnv,
     }
+    if (!this.opts.opencodeBin || !this.opts.port) throw new Error("opencodeBin and port are required in spawn mode")
     this.process = spawn(this.opts.opencodeBin, ["serve", "--port", String(this.opts.port), "--hostname", "127.0.0.1"], {
       env,
       cwd: this.opts.directory,
