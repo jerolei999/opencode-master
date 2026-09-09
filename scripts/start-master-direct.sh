@@ -69,15 +69,7 @@ env MASTER_PORT="$MASTER_PORT" \
   bun run "$ROOT_DIR/src/index.ts" >"$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
-echo "Starting OpenCode heartbeat keep-alive ($HB_ID @ $OPENCODE_URL)"
-bun run "$ROOT_DIR/scripts/opencode-heartbeat.ts" \
-  --master "http://127.0.0.1:${MASTER_PORT}" \
-  --api-key "$BOOTSTRAP_KEY" \
-  --id "$HB_ID" \
-  --opencode-url "$OPENCODE_URL" \
-  --region "$HB_REGION" \
-  --capacity "$HB_CAPACITY" >"$HB_LOG_FILE" 2>&1 &
-echo $! > "$HB_PID_FILE"
+# (heartbeat is started below, once the Master is reachable)
 
 # Wait for the Master to be reachable.
 ready=false
@@ -101,6 +93,16 @@ if [ "$ready" != true ]; then
   tail -40 "$LOG_FILE" >&2 || true
   exit 1
 fi
+
+echo "Starting OpenCode heartbeat keep-alive ($HB_ID @ $OPENCODE_URL)"
+bun run "$ROOT_DIR/scripts/opencode-heartbeat.ts" \
+  --master "http://127.0.0.1:${MASTER_PORT}" \
+  --api-key "$BOOTSTRAP_KEY" \
+  --id "$HB_ID" \
+  --opencode-url "$OPENCODE_URL" \
+  --region "$HB_REGION" \
+  --capacity "$HB_CAPACITY" >"$HB_LOG_FILE" 2>&1 &
+echo $! > "$HB_PID_FILE"
 
 echo "Master is ready."
 echo "  Console: http://localhost:${MASTER_PORT}"

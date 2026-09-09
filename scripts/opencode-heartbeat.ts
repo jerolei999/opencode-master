@@ -97,11 +97,20 @@ async function hbTick() {
   }
 }
 
-hbBootstrap().then(() => {
+async function run() {
+  // Keep retrying registration so a not-yet-ready Master does not kill the keep-alive.
+  for (;;) {
+    try {
+      await hbBootstrap()
+      break
+    } catch (error) {
+      console.error(`[opencode-heartbeat] bootstrap failed (will retry):`, (error as Error).message)
+      await Bun.sleep(2000)
+    }
+  }
   console.log(`[opencode-heartbeat] reporting every ${heartbeatMs}ms`)
   void hbTick()
   setInterval(() => void hbTick(), heartbeatMs)
-}).catch((error) => {
-  console.error(`[opencode-heartbeat] bootstrap failed:`, (error as Error).message)
-  process.exit(1)
-})
+}
+
+void run()
